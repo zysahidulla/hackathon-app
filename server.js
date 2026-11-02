@@ -75,13 +75,16 @@ function scoreRisk({ amount, buyerCountry, shipCountry }) {
   const reasons = [];
   let score = 0;
 
-  const knownCountries = new Set(orders.map(o => o.buyerCountry));
+  // Only learn "normal" behavior from low-risk or historical orders
+  const trusted = orders.filter(o => !o.risk || o.risk.level === 'LOW');
+
+  const knownCountries = new Set(trusted.map(o => o.buyerCountry));
   if (!knownCountries.has(buyerCountry)) {
     score += 40;
     reasons.push(`First order ever from ${buyerCountry}`);
   }
 
-  const avg = orders.reduce((s, o) => s + o.amount, 0) / orders.length;
+  const avg = trusted.reduce((s, o) => s + o.amount, 0) / trusted.length;
   if (amount > avg * 3) {
     score += 30;
     reasons.push(`Amount $${amount} is over 3x the average ($${avg.toFixed(2)})`);
@@ -142,4 +145,4 @@ app.post('/api/orders', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Running on http://localhost:${PORT} (AI step enabled)`));

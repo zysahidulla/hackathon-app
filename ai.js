@@ -1,5 +1,5 @@
-const API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 const VALID = ['approve', 'review', 'hold'];
 
 const SYSTEM_PROMPT = `You are a fraud-review assistant for a small online seller.
@@ -10,7 +10,7 @@ Rules:
 - Base your answer ONLY on the data provided. Do not invent facts about the buyer.
 - Be calm and specific. Mention the signals that matter most.
 - The seller makes the final decision, so phrase it as a recommendation.
-- Reply with ONLY a JSON object, no markdown, in this exact shape:
+- Reply with ONLY a JSON object in this exact shape:
 {"explanation": "2-3 sentences", "recommendation": "approve" | "review" | "hold"}`;
 
 // Used when there is no API key or the AI call fails, so the app never breaks.
@@ -24,7 +24,7 @@ function fallback(risk) {
 }
 
 async function explainRisk(order, risk) {
-  if (!process.env.ANTHROPIC_API_KEY) return fallback(risk);
+  if (!process.env.GEMINI_API_KEY) return fallback(risk);
 
   const userMessage = JSON.stringify({
     order: {
@@ -39,22 +39,25 @@ async function explainRisk(order, risk) {
     const res = await fetch(API_URL, {
       method: 'POST',
       headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
+        'x-goog-api-key': process.env.GEMINI_API_KEY,
+        'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 300,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userMessage }],
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          maxOutputTokens: 1000,
+        },
       }),
     });
 
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+    const text = (data.candidates?.[0]?.content?.parts || [])
+      .map(p => p.text || '')
+      .join('');
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
