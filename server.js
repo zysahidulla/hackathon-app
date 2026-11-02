@@ -76,7 +76,7 @@ function scoreRisk({ amount, buyerCountry, shipCountry }) {
   let score = 0;
 
   // Only learn "normal" behavior from low-risk or historical orders
-  const trusted = orders.filter(o => !o.risk || o.risk.level === 'LOW');
+  const trusted = orders.filter(o => !o.risk);
 
   const knownCountries = new Set(trusted.map(o => o.buyerCountry));
   if (!knownCountries.has(buyerCountry)) {

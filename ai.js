@@ -1,4 +1,4 @@
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 const VALID = ['approve', 'review', 'hold'];
 
@@ -13,7 +13,6 @@ Rules:
 - Reply with ONLY a JSON object in this exact shape:
 {"explanation": "2-3 sentences", "recommendation": "approve" | "review" | "hold"}`;
 
-// Used when there is no API key or the AI call fails, so the app never breaks.
 function fallback(risk) {
   const recommendation =
     risk.level === 'HIGH' ? 'hold' : risk.level === 'MEDIUM' ? 'review' : 'approve';
@@ -24,7 +23,10 @@ function fallback(risk) {
 }
 
 async function explainRisk(order, risk) {
-  if (!process.env.GEMINI_API_KEY) return fallback(risk);
+  if (!process.env.GEMINI_API_KEY) {
+    console.log('[ai] GEMINI_API_KEY missing, using fallback');
+    return fallback(risk);
+  }
 
   const userMessage = JSON.stringify({
     order: {
@@ -36,6 +38,7 @@ async function explainRisk(order, risk) {
   });
 
   try {
+    console.log(`[ai] calling ${MODEL}...`);
     const res = await fetch(API_URL, {
       method: 'POST',
       headers: {
@@ -47,30 +50,35 @@ async function explainRisk(order, risk) {
         contents: [{ role: 'user', parts: [{ text: userMessage }] }],
         generationConfig: {
           responseMimeType: 'application/json',
-          maxOutputTokens: 1000,
+          maxOutputTokens: 4096,
         },
       }),
+      signal: AbortSignal.timeout(60000),
     });
 
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
+    const raw = await res.text();
+    console.log('[ai] HTTP status:', res.status);
+    if (!res.ok) throw new Error(raw.slice(0, 500));
 
-    const text = (data.candidates?.[0]?.content?.parts || [])
-      .map(p => p.text || '')
-      .join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    if (!parsed.explanation || !VALID.includes(parsed.recommendation)) {
-      throw new Error('Unexpected AI response shape');
+    const data = JSON.parse(raw);
+    const candidate = data.candidates?.[0];
+    const text = (candidate?.content?.parts || []).map(p => p.text || '').join('');
+    if (!text) {
+      throw new Error(`Empty reply. finishReason: ${candidate?.finishReason}. Raw: ${raw.slice(0, 500)}`);
     }
+
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
+    if (!parsed.explanation || !VALID.includes(parsed.recommendation)) {
+      throw new Error('Unexpected reply shape: ' + text.slice(0, 300));
+    }
+    console.log('[ai] success');
     return {
       explanation: String(parsed.explanation),
       recommendation: parsed.recommendation,
       source: 'ai',
     };
   } catch (err) {
-    console.error('AI explanation failed, using fallback:', err.message);
+    console.error('[ai] FAILED, using fallback:', err.name, err.message);
     return fallback(risk);
   }
 }
