@@ -3,6 +3,9 @@ const express = require('express');
 const crypto = require('crypto');
 const { explainRisk } = require('./ai');
 
+const PORT = process.env.PORT || 3000;
+const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
@@ -54,11 +57,66 @@ async function createPayPalOrder(amount) {
           amount: { currency_code: 'USD', value: amount.toFixed(2) },
         },
       ],
+      // Gives us a buyer-approval link and sends the buyer back to the dashboard afterward
+      payment_source: {
+        paypal: {
+          experience_context: {
+            brand_name: 'Seller Shield (sandbox)',
+            user_action: 'PAY_NOW',
+            shipping_preference: 'NO_SHIPPING',
+            return_url: `${APP_URL}/`,
+            cancel_url: `${APP_URL}/`,
+          },
+        },
+      },
     }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(`Create order failed: ${JSON.stringify(data)}`);
   return data; // contains id, status, links
+}
+
+async function capturePayPalOrder(orderId) {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/v2/checkout/orders/${orderId}/capture`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': crypto.randomUUID(),
+    },
+  });
+  const data = await res.json();
+  return { ok: res.ok, data };
+}
+
+// Tries to capture and records the outcome on the order (never throws)
+async function tryCapture(order) {
+  try {
+    const { ok, data } = await capturePayPalOrder(order.id);
+
+    if (ok) {
+      order.paypalStatus = data.status; // COMPLETED, or PENDING if the account holds payments for review
+      order.captureId = data.purchase_units?.[0]?.payments?.captures?.[0]?.id;
+      order.captureMessage =
+        data.status === 'COMPLETED' ? null : `Capture status: ${data.status}`;
+      return;
+    }
+
+    const issue = data.details?.[0]?.issue;
+    if (issue === 'ORDER_NOT_APPROVED') {
+      order.captureMessage = 'Waiting for the buyer to approve this payment on PayPal.';
+    } else if (issue === 'ORDER_ALREADY_CAPTURED') {
+      order.paypalStatus = 'COMPLETED';
+      order.captureMessage = null;
+    } else {
+      order.captureMessage = `Capture failed: ${issue || data.message || 'unknown error'}`;
+      console.error('Capture error:', JSON.stringify(data));
+    }
+  } catch (err) {
+    order.captureMessage = `Capture failed: ${err.message}`;
+    console.error('Capture error:', err);
+  }
 }
 
 // ---------- Fake order history (simulated past transactions) ----------
@@ -70,31 +128,87 @@ const orders = [
   { id: 'seed-4', amount: 35, buyerCountry: 'SG', shipCountry: 'SG', createdAt: Date.now() - 1 * DAY },
 ];
 
-// ---------- Risk scoring (rule-based; AI explanation comes later) ----------
+// ---------- Distance helper (approximate country-center coordinates) ----------
+const COUNTRY_COORDS = {
+  PH: [12.9, 121.8], SG: [1.35, 103.8], MY: [4.2, 101.9], ID: [-0.8, 113.9],
+  TH: [15.9, 101.0], VN: [14.1, 108.3], JP: [36.2, 138.3], KR: [35.9, 127.8],
+  CN: [35.9, 104.2], HK: [22.3, 114.2], TW: [23.7, 121.0], IN: [20.6, 79.0],
+  PK: [30.4, 69.3], BD: [23.7, 90.4], AU: [-25.3, 133.8], NZ: [-40.9, 174.9],
+  US: [37.1, -95.7], CA: [56.1, -106.3], MX: [23.6, -102.6], BR: [-14.2, -51.9],
+  GB: [55.4, -3.4], DE: [51.2, 10.5], FR: [46.2, 2.2], ES: [40.5, -3.7],
+  IT: [41.9, 12.6], NL: [52.1, 5.3], RU: [61.5, 105.3], TR: [39.0, 35.2],
+  AE: [23.4, 53.8], SA: [23.9, 45.1], EG: [26.8, 30.8], NG: [9.1, 8.7],
+  GH: [7.9, -1.0], KE: [0.0, 37.9], ZA: [-30.6, 22.9],
+};
+
+function distanceKm([lat1, lon1], [lat2, lon2]) {
+  const R = 6371;
+  const toRad = d => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// ---------- Risk scoring ----------
 function scoreRisk({ amount, buyerCountry, shipCountry }) {
   const reasons = [];
   let score = 0;
 
-  // Only learn "normal" behavior from low-risk or historical orders
-  const trusted = orders.filter(o => !o.risk);
+  // Learn "normal" behavior only from seed history and orders the seller approved
+  const trusted = orders.filter(o => !o.risk || o.status === 'approved');
 
+  // Signal 1: new buyer country
   const knownCountries = new Set(trusted.map(o => o.buyerCountry));
-  if (!knownCountries.has(buyerCountry)) {
+  const isNewCountry = !knownCountries.has(buyerCountry);
+  if (isNewCountry) {
     score += 40;
     reasons.push(`First order ever from ${buyerCountry}`);
   }
 
-  const avg = trusted.reduce((s, o) => s + o.amount, 0) / trusted.length;
-  if (amount > avg * 3) {
-    score += 30;
-    reasons.push(`Amount $${amount} is over 3x the average ($${avg.toFixed(2)})`);
+  // Signal 2: distance from where this seller usually gets orders
+  if (isNewCountry && COUNTRY_COORDS[buyerCountry]) {
+    const distances = [...knownCountries]
+      .filter(c => COUNTRY_COORDS[c])
+      .map(c => distanceKm(COUNTRY_COORDS[buyerCountry], COUNTRY_COORDS[c]));
+    if (distances.length) {
+      const nearest = Math.min(...distances);
+      if (nearest > 3000) {
+        score += 15;
+        reasons.push(
+          `Buyer country is about ${(Math.round(nearest / 100) * 100).toLocaleString('en-US')} km from the closest place this seller usually gets orders`
+        );
+      }
+    }
   }
 
+  // Signal 3: amount far above the typical order (median resists being skewed by one big order)
+  const amounts = trusted.map(o => o.amount).sort((a, b) => a - b);
+  const mid = Math.floor(amounts.length / 2);
+  const typical = amounts.length % 2
+    ? amounts[mid]
+    : (amounts[mid - 1] + amounts[mid]) / 2;
+  const isLargeAmount = amount > typical * 3;
+  if (isLargeAmount) {
+    score += 30;
+    reasons.push(`Amount $${amount} is over 3x the typical order ($${typical.toFixed(2)})`);
+  }
+
+  // Signal 4: new buyer country combined with a large order
+  if (isNewCountry && isLargeAmount) {
+    score += 10;
+    reasons.push('A new buyer country combined with a large order');
+  }
+
+  // Signal 5: buyer and shipping country differ
   if (buyerCountry !== shipCountry) {
     score += 20;
     reasons.push(`Buyer country (${buyerCountry}) differs from shipping country (${shipCountry})`);
   }
 
+  // Signal 6: burst of orders
   const recent = orders.filter(o => Date.now() - o.createdAt < 10 * 60 * 1000).length;
   if (recent >= 3) {
     score += 20;
@@ -124,16 +238,21 @@ app.post('/api/orders', async (req, res) => {
     // Score BEFORE adding this order, so it's compared against past history
     const risk = scoreRisk({ amount, buyerCountry, shipCountry });
     risk.aiSummary = await explainRisk({ amount, buyerCountry, shipCountry }, risk);
-    
+
     const paypal = await createPayPalOrder(amount);
+    const approveUrl = (paypal.links || []).find(
+      l => l.rel === 'payer-action' || l.rel === 'approve'
+    )?.href;
 
     const order = {
       id: paypal.id,
       paypalStatus: paypal.status,
+      approveUrl,
       amount,
       buyerCountry,
       shipCountry,
       createdAt: Date.now(),
+      status: 'pending', // pending | approved | held
       risk,
     };
     orders.push(order);
@@ -144,5 +263,38 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT} (AI step enabled)`));
+// Seller decision: approve (and try to capture payment) or hold
+app.post('/api/orders/:id/decision', async (req, res) => {
+  const decision = req.body.decision;
+  if (!['approved', 'held'].includes(decision)) {
+    return res.status(400).json({ error: 'decision must be "approved" or "held"' });
+  }
+
+  const order = orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!order.risk) return res.status(400).json({ error: 'Historical orders cannot be changed' });
+  if (decision === 'held' && order.paypalStatus === 'COMPLETED') {
+    return res.status(400).json({ error: 'Payment already captured; a refund would be needed' });
+  }
+
+  order.status = decision;
+  order.decidedAt = Date.now();
+
+  if (decision === 'approved' && order.paypalStatus !== 'COMPLETED') {
+    await tryCapture(order);
+  }
+  res.json(order);
+});
+
+// Retry capture (after the buyer has approved on PayPal)
+app.post('/api/orders/:id/capture', async (req, res) => {
+  const order = orders.find(o => o.id === req.params.id);
+  if (!order || !order.risk) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'approved') {
+    return res.status(400).json({ error: 'Approve the order before capturing payment' });
+  }
+  if (order.paypalStatus !== 'COMPLETED') await tryCapture(order);
+  res.json(order);
+});
+
+app.listen(PORT, () => console.log(`Running on ${APP_URL} (AI step enabled)`));
