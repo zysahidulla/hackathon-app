@@ -6,7 +6,7 @@ Seller Shield was built for the PayPal AI Hackathon on Devpost. It helps a small
 
 > Seller Shield is an independent hackathon project. It is not made by or affiliated with PayPal. It runs only against the PayPal **sandbox** (test money, test accounts).
 
-**Team:** [Your name] and [Teammate's name]
+**Team:** Zamanttha Zyrah Sahidulla and Marc Jairo Lim
 
 ---
 
