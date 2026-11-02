@@ -3,130 +3,244 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Seller Shield</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
-    form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-    input, button { padding: .5rem; font-size: 1rem; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
-    .badge { padding: 2px 8px; border-radius: 8px; color: #fff; font-weight: 600; }
-    .LOW, .approved { background: #2e7d32; }
-    .MEDIUM { background: #ef6c00; }
-    .HIGH, .held { background: #c62828; }
-    .pending { background: #757575; }
-    .actions { margin-top: 4px; }
-    .actions button { margin: 2px 4px 2px 0; cursor: pointer; }
-    .actions a { margin-right: 8px; }
-    small { color: #555; }
-  </style>
+  <title>Orders - Seller Shield</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <h1>Seller Shield</h1>
-  <p>Simulate an incoming order. It creates a real PayPal sandbox order and scores its risk.</p>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <svg width="22" height="24" viewBox="0 0 20 22" aria-hidden="true">
+          <path d="M10 1 2 4v6c0 5 3.4 9.3 8 11 4.6-1.7 8-6 8-11V4z" fill="none" stroke="#0070e0" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+        Seller Shield
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="/" aria-current="page">Orders</a>
+        <a href="/disputes.html">Disputes</a>
+      </nav>
+    </div>
+  </header>
 
-  <form id="orderForm">
-    <input name="amount" type="number" step="0.01" placeholder="Amount (USD)" required />
-    <input name="buyerCountry" maxlength="2" placeholder="Buyer country (PH)" required />
-    <input name="shipCountry" maxlength="2" placeholder="Ship-to country (PH)" required />
-    <button type="submit">Create order</button>
-  </form>
-  <p id="msg"></p>
+  <section class="hero">
+    <div class="hero-inner">
+      <h1>Orders</h1>
+      <p class="lede">
+        Test orders are created in the real PayPal sandbox. Buyer countries and past sales are simulated,
+        because the sandbox has no real buyer data.
+      </p>
+    </div>
+  </section>
 
-  <table>
-    <thead>
-      <tr><th>Time</th><th>Order ID</th><th>Amount</th><th>Buyer / Ship</th><th>Risk</th><th>Decision</th></tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
+  <main class="page">
+    <section class="panel" aria-labelledby="add-title">
+      <h2 id="add-title">Add a test order</h2>
+      <form id="orderForm">
+        <div class="form-grid">
+          <div>
+            <label for="amount">Amount (USD)</label>
+            <input id="amount" name="amount" type="number" step="0.01" min="0.01" placeholder="30" required />
+          </div>
+          <div>
+            <label for="buyerCountry">Buyer country</label>
+            <input id="buyerCountry" name="buyerCountry" maxlength="2" placeholder="PH" autocomplete="off" autocapitalize="characters" required />
+          </div>
+          <div>
+            <label for="shipCountry">Ship-to country</label>
+            <input id="shipCountry" name="shipCountry" maxlength="2" placeholder="PH" autocomplete="off" autocapitalize="characters" required />
+          </div>
+          <button class="btn btn-primary" type="submit" id="createBtn">Create and score order</button>
+        </div>
+      </form>
+      <div class="quick">
+        <span>Fill in an example:</span>
+        <button class="btn btn-quiet btn-small" type="button" data-fill="30,PH,PH">Typical order</button>
+        <button class="btn btn-quiet btn-small" type="button" data-fill="500,NG,PH">Suspicious order</button>
+      </div>
+      <p class="msg" id="msg" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="section-head">
+      <h2>Needs your decision</h2>
+      <span class="count" id="waitingCount"></span>
+    </div>
+    <p class="hint">
+      Each meter shows the risk score out of 100. The marks show where medium (30) and high (60) begin.
+    </p>
+    <div class="queue" id="waiting"></div>
+
+    <div class="section-head">
+      <h2>Decided</h2>
+      <span class="count" id="decidedCount"></span>
+    </div>
+    <div class="queue" id="decided"></div>
+
+    <div class="section-head"></div>
+    <details class="panel history">
+      <summary id="historySummary">Simulated order history</summary>
+      <p class="hint">These stand in for a seller's past sales, so the system has something to compare new orders against.</p>
+      <table class="table">
+        <thead>
+          <tr><th>Date</th><th>Order</th><th>Amount</th><th>Buyer</th><th>Ship-to</th></tr>
+        </thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </details>
+  </main>
 
   <script>
+    const $ = id => document.getElementById(id);
     const esc = s => String(s).replace(/[&<>"']/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+    const money = n => '$' + Number(n).toFixed(2);
+    const when = ts => new Date(ts).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
 
-    function riskCell(o) {
-      if (!o.risk) return '<small>-</small>';
-      const ai = o.risk.aiSummary;
-      return `<span class="badge ${o.risk.level}">${o.risk.level} (${o.risk.score})</span>` +
-        (ai
-          ? `<br><strong>Suggested: ${esc(ai.recommendation)}</strong>
-             <br><small>${esc(ai.explanation)}</small>
-             <br><small><em>(${ai.source === 'ai' ? 'AI analysis' : 'rule-based'})</em></small>`
-          : `<br><small>${o.risk.reasons.map(esc).join('<br>') || 'No issues found'}</small>`);
+    const LEVEL_LABEL = { LOW: 'Low risk', MEDIUM: 'Medium risk', HIGH: 'High risk' };
+    const STATUS_LABEL = { pending: 'Awaiting your decision', approved: 'Approved', held: 'Held' };
+
+    function showMessage(text, isError) {
+      const el = $('msg');
+      el.textContent = text;
+      el.className = isError ? 'msg error' : 'msg';
     }
 
-    function decisionCell(o) {
-      if (!o.risk) return '<small>-</small>';
+    function orderHtml(o) {
+      const id = esc(o.id);
       const status = o.status || 'pending';
       const captured = o.paypalStatus === 'COMPLETED';
-      const id = esc(o.id);
+      const level = o.risk.level;
+      const score = Number(o.risk.score) || 0;
+      const ai = o.risk.aiSummary;
+      const reasons = o.risk.reasons || [];
 
-      let extra = '';
+      const analysis = ai
+        ? `<p class="verdict">Suggested action: ${esc(cap(ai.recommendation))}</p>
+           <p class="analysis">${esc(ai.explanation)}</p>
+           <p class="source">${ai.source === 'ai' ? 'AI analysis' : 'Rule-based summary (AI was unavailable)'}</p>`
+        : '';
+
+      const rules = reasons.length
+        ? `<details class="rules"><summary>Rules triggered (${reasons.length})</summary>
+             <ul>${reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul></details>`
+        : `<p class="source">No rules triggered.</p>`;
+
+      let capture = '';
       if (status === 'approved') {
-        if (captured) {
-          extra = `<div><small>Payment captured${o.captureId ? ' (' + esc(o.captureId) + ')' : ''}</small></div>`;
-        } else {
-          extra = `<div><small>${esc(o.captureMessage || 'Capture not attempted yet.')}</small></div>
-            <div class="actions">
-              ${o.approveUrl ? `<a href="${esc(o.approveUrl)}" target="_blank" rel="noopener">Open buyer approval</a>` : ''}
-              <button data-id="${id}" data-capture="1">Retry capture</button>
-            </div>`;
-        }
+        capture = captured
+          ? `<p class="note">Payment captured${o.captureId ? ' (' + esc(o.captureId) + ')' : ''}.</p>`
+          : `<p class="note">${esc(o.captureMessage || 'Payment not captured yet.')}</p>
+             <div class="btn-row">
+               ${o.approveUrl ? `<a class="link" href="${esc(o.approveUrl)}" target="_blank" rel="noopener">Open buyer approval</a>` : ''}
+               <button class="btn btn-quiet btn-small" data-id="${id}" data-capture="1">Retry capture</button>
+             </div>`;
       }
 
       const approveBtn = status !== 'approved'
-        ? `<button data-id="${id}" data-decision="approved">Approve</button>` : '';
+        ? `<button class="btn btn-primary btn-small" data-id="${id}" data-decision="approved">Approve order</button>` : '';
       const holdBtn = status !== 'held' && !captured
-        ? `<button data-id="${id}" data-decision="held">Hold</button>` : '';
+        ? `<button class="btn btn-quiet btn-small" data-id="${id}" data-decision="held">Hold order</button>` : '';
 
-      return `<span class="badge ${status}">${status.toUpperCase()}</span>
-              ${extra}
-              <div class="actions">${approveBtn}${holdBtn}</div>`;
+      return `
+        <article class="order risk-${esc(level)}">
+          <div>
+            <div class="amount">${money(o.amount)}</div>
+            <div class="route">Buyer in ${esc(o.buyerCountry)}, shipping to ${esc(o.shipCountry)}</div>
+            <div class="meta">${when(o.createdAt)}<br>Order ${id}<br>PayPal status: ${esc(o.paypalStatus || 'unknown')}</div>
+          </div>
+          <div>
+            <div class="risk-head">
+              <strong class="risk-word">${LEVEL_LABEL[level] || esc(level)}</strong>
+              <span class="score">${score} of 100</span>
+            </div>
+            <div class="meter" role="img" aria-label="Risk score ${score} out of 100">
+              <div class="meter-fill" style="width:${Math.min(score, 100)}%"></div>
+              <span class="meter-tick t30"></span><span class="meter-tick t60"></span>
+            </div>
+            ${analysis}
+            ${rules}
+          </div>
+          <div>
+            <span class="pill pill-${status}">${STATUS_LABEL[status]}</span>
+            ${capture}
+            <div class="btn-row">${approveBtn}${holdBtn}</div>
+          </div>
+        </article>`;
     }
 
     async function load() {
       const orders = await (await fetch('/api/orders')).json();
-      document.getElementById('rows').innerHTML = orders.map(o => `
+      const scored = orders.filter(o => o.risk);
+      const history = orders.filter(o => !o.risk);
+      const waiting = scored.filter(o => (o.status || 'pending') === 'pending');
+      const decided = scored.filter(o => (o.status || 'pending') !== 'pending');
+
+      $('waitingCount').textContent = waiting.length ? `${waiting.length} order${waiting.length === 1 ? '' : 's'}` : '';
+      $('decidedCount').textContent = decided.length ? `${decided.length} order${decided.length === 1 ? '' : 's'}` : '';
+
+      $('waiting').innerHTML = waiting.length
+        ? waiting.map(orderHtml).join('')
+        : '<p class="empty">Nothing is waiting. Add a test order above to see how it is scored.</p>';
+      $('decided').innerHTML = decided.length
+        ? decided.map(orderHtml).join('')
+        : '<p class="empty">Orders you approve or hold appear here.</p>';
+
+      $('historySummary').textContent = `Simulated order history (${history.length} orders)`;
+      $('historyBody').innerHTML = history.map(o => `
         <tr>
-          <td>${new Date(o.createdAt).toLocaleString()}</td>
-          <td>${esc(o.id)}<br><small>${esc(o.paypalStatus || 'historical')}</small></td>
-          <td>$${Number(o.amount).toFixed(2)}</td>
-          <td>${esc(o.buyerCountry)} / ${esc(o.shipCountry)}</td>
-          <td>${riskCell(o)}</td>
-          <td>${decisionCell(o)}</td>
+          <td>${when(o.createdAt)}</td><td>${esc(o.id)}</td><td>${money(o.amount)}</td>
+          <td>${esc(o.buyerCountry)}</td><td>${esc(o.shipCountry)}</td>
         </tr>`).join('');
     }
 
-    // Approve / Hold / Retry capture button clicks
-    document.getElementById('rows').addEventListener('click', async e => {
+    // Approve / Hold / Retry capture
+    document.addEventListener('click', async e => {
+      const fill = e.target.closest('button[data-fill]');
+      if (fill) {
+        const [amount, buyer, ship] = fill.dataset.fill.split(',');
+        $('amount').value = amount;
+        $('buyerCountry').value = buyer;
+        $('shipCountry').value = ship;
+        return;
+      }
+
       const btn = e.target.closest('button[data-id]');
       if (!btn) return;
       btn.disabled = true;
 
       const id = encodeURIComponent(btn.dataset.id);
       const isCapture = !!btn.dataset.capture;
-      const res = await fetch(
-        isCapture ? `/api/orders/${id}/capture` : `/api/orders/${id}/decision`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(isCapture ? {} : { decision: btn.dataset.decision }),
-        }
-      );
-      if (!res.ok) {
+      try {
+        const res = await fetch(
+          isCapture ? `/api/orders/${id}/capture` : `/api/orders/${id}/decision`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(isCapture ? {} : { decision: btn.dataset.decision }),
+          }
+        );
         const data = await res.json();
-        document.getElementById('msg').textContent = 'Error: ' + data.error;
-      } else {
-        document.getElementById('msg').textContent = '';
+        if (!res.ok) showMessage(data.error || 'Something went wrong.', true);
+        else if (isCapture) showMessage('', false);
+        else showMessage(`Order ${data.status}.`, false);
+      } catch {
+        showMessage('Could not reach the server. Check that it is still running.', true);
       }
       load();
     });
 
-    document.getElementById('orderForm').addEventListener('submit', async e => {
+    // Create order
+    $('orderForm').addEventListener('submit', async e => {
       e.preventDefault();
       const body = Object.fromEntries(new FormData(e.target));
-      const submit = e.target.querySelector('button');
-      submit.disabled = true;
+      const btn = $('createBtn');
+      btn.disabled = true;
+      btn.textContent = 'Scoring order…';
       try {
         const res = await fetch('/api/orders', {
           method: 'POST',
@@ -134,9 +248,13 @@
           body: JSON.stringify(body),
         });
         const data = await res.json();
-        document.getElementById('msg').textContent = res.ok ? '' : 'Error: ' + data.error;
+        if (res.ok) showMessage('Order scored.', false);
+        else showMessage(data.error || 'Could not create the order.', true);
+      } catch {
+        showMessage('Could not reach the server. Check that it is still running.', true);
       } finally {
-        submit.disabled = false;
+        btn.disabled = false;
+        btn.textContent = 'Create and score order';
       }
       load();
     });

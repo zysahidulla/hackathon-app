@@ -1,0 +1,183 @@
+/* Seller Shield shared styles (PayPal-inspired look). The Disputes page should reuse these classes. */
+:root {
+  --navy: #003087;
+  --navy-deep: #001c64;
+  --blue: #0070e0;
+  --blue-hover: #0057b8;
+  --blue-tint: #e8f1fc;
+
+  --paper: #f5f7fa;
+  --surface: #ffffff;
+  --ink: #2c2e2f;
+  --ink-2: #5e6a71;
+  --line: #d9dde1;
+
+  --safe: #0f8a4f;
+  --safe-bg: #e2f4ea;
+  --safe-ink: #0a6b3c;
+  --caution: #f0a30a;
+  --caution-bg: #fdf1d6;
+  --caution-ink: #7a4f00;
+  --danger: #cc2d2d;
+  --danger-bg: #fbe5e5;
+  --danger-ink: #a4161a;
+
+  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* ---------- Top bar ---------- */
+.topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
+.topbar-inner {
+  max-width: 1120px; margin: 0 auto; padding: 0 20px; height: 64px;
+  display: flex; align-items: center; gap: 32px;
+}
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--navy); text-decoration: none; font-weight: 800; font-size: 1.25rem; letter-spacing: -0.02em;
+}
+.nav { display: flex; gap: 24px; height: 100%; }
+.nav a {
+  display: flex; align-items: center; height: 100%;
+  color: var(--ink); text-decoration: none; font-weight: 500;
+  border-bottom: 3px solid transparent;
+}
+.nav a:hover { color: var(--blue); }
+.nav a[aria-current='page'] { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* ---------- Hero ---------- */
+.hero { background: var(--navy); color: #fff; padding: 36px 0 76px; }
+.hero-inner { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+.hero h1 { font-size: 2rem; line-height: 1.2; letter-spacing: -0.02em; margin: 0 0 8px; font-weight: 700; }
+.lede { color: #cfe0f7; max-width: 64ch; margin: 0; }
+
+/* ---------- Page ---------- */
+.page { max-width: 1120px; margin: -44px auto 0; padding: 0 20px 64px; position: relative; }
+h2 { font-size: 1.25rem; margin: 0; font-weight: 700; color: var(--navy-deep); }
+.section-head { display: flex; align-items: baseline; gap: 10px; margin: 36px 0 6px; }
+.count { color: var(--ink-2); font-size: 0.9rem; }
+.hint { color: var(--ink-2); font-size: 0.9rem; margin: 0 0 12px; max-width: 70ch; }
+
+.panel {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px 24px;
+  box-shadow: 0 2px 8px rgba(0, 28, 100, 0.08);
+}
+
+/* ---------- Form ---------- */
+.form-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 14px; align-items: end; margin-top: 14px;
+}
+label { display: block; font-size: 0.875rem; font-weight: 600; margin-bottom: 6px; }
+input {
+  font: inherit; width: 100%; height: 44px; padding: 0 12px;
+  border: 1px solid #8f9aa1; border-radius: 8px; background: #fff; color: var(--ink);
+}
+input:hover { border-color: var(--ink-2); }
+.quick {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  margin-top: 14px; color: var(--ink-2); font-size: 0.875rem;
+}
+
+/* ---------- Buttons (pill-shaped) ---------- */
+.btn {
+  font: inherit; font-weight: 600; min-height: 44px; padding: 0 24px;
+  border-radius: 999px; border: 2px solid transparent; cursor: pointer;
+}
+.btn-primary { background: var(--blue); color: #fff; }
+.btn-primary:hover { background: var(--blue-hover); }
+.btn-quiet { background: #fff; border-color: var(--blue); color: var(--blue); }
+.btn-quiet:hover { background: var(--blue-tint); }
+.btn-small { min-height: 36px; padding: 0 16px; font-size: 0.9rem; }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+@media (prefers-reduced-motion: no-preference) {
+  .btn { transition: background-color 0.15s; }
+}
+
+.msg { min-height: 1.4em; margin: 12px 0 0; color: var(--ink-2); }
+.msg.error { color: var(--danger-ink); font-weight: 600; }
+
+/* ---------- Order queue ---------- */
+.queue {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 28, 100, 0.08);
+}
+.empty { margin: 0; padding: 24px; color: var(--ink-2); }
+
+.order {
+  display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 2.4fr) minmax(190px, 1fr);
+  gap: 24px; padding: 20px 24px 20px 22px;
+  border-bottom: 1px solid var(--line); border-left: 6px solid var(--line);
+}
+.order:last-child { border-bottom: 0; }
+.risk-LOW { border-left-color: var(--safe); }
+.risk-MEDIUM { border-left-color: var(--caution); }
+.risk-HIGH { border-left-color: var(--danger); }
+
+.amount { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; color: var(--navy-deep); }
+.route { margin: 2px 0 8px; }
+.meta { font-size: 0.8125rem; color: var(--ink-2); overflow-wrap: anywhere; }
+
+.risk-head { display: flex; align-items: baseline; gap: 10px; }
+.risk-word { font-size: 1rem; }
+.risk-LOW .risk-word { color: var(--safe-ink); }
+.risk-MEDIUM .risk-word { color: var(--caution-ink); }
+.risk-HIGH .risk-word { color: var(--danger-ink); }
+.score { color: var(--ink-2); font-size: 0.875rem; }
+
+/* The risk meter: ticks mark where medium (30) and high (60) begin */
+.meter { position: relative; height: 10px; background: #e6ebf0; border-radius: 999px; margin: 10px 0 14px; }
+.meter-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; }
+.risk-LOW .meter-fill { background: var(--safe); }
+.risk-MEDIUM .meter-fill { background: var(--caution); }
+.risk-HIGH .meter-fill { background: var(--danger); }
+.meter-tick { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); opacity: 0.3; }
+.t30 { left: 30%; }
+.t60 { left: 60%; }
+
+.verdict { font-weight: 600; margin: 0 0 4px; }
+.analysis { font-size: 1rem; line-height: 1.55; max-width: 64ch; margin: 0; }
+.source { font-size: 0.8125rem; color: var(--ink-2); margin: 6px 0 0; }
+
+.rules summary { cursor: pointer; color: var(--blue); font-weight: 600; font-size: 0.9rem; margin-top: 8px; }
+.rules ul { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 0.9rem; }
+
+/* ---------- Decision column ---------- */
+.pill {
+  display: inline-block; padding: 3px 12px; border-radius: 999px;
+  font-size: 0.8125rem; font-weight: 600;
+}
+.pill-pending { background: #e8ecef; color: var(--ink-2); }
+.pill-approved { background: var(--safe-bg); color: var(--safe-ink); }
+.pill-held { background: var(--danger-bg); color: var(--danger-ink); }
+.note { font-size: 0.875rem; color: var(--ink-2); margin: 8px 0 0; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.link { color: var(--blue); font-weight: 600; }
+
+/* ---------- Simulated history ---------- */
+.history summary { cursor: pointer; font-weight: 600; color: var(--navy-deep); }
+.history .hint { margin-top: 10px; }
+.table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.table th, .table td { text-align: left; padding: 10px; border-bottom: 1px solid var(--line); }
+.table th { color: var(--ink-2); font-weight: 600; }
+
+/* ---------- Small screens ---------- */
+@media (max-width: 820px) {
+  .order { grid-template-columns: 1fr; gap: 12px; }
+  .form-grid { grid-template-columns: 1fr 1fr; }
+  .form-grid .btn { grid-column: 1 / -1; }
+  .nav { gap: 16px; }
+}
