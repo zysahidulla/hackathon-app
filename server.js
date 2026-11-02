@@ -70,13 +70,13 @@ const orders = [
   { id: 'seed-4', amount: 35, buyerCountry: 'SG', shipCountry: 'SG', createdAt: Date.now() - 1 * DAY },
 ];
 
-// ---------- Risk scoring (rule-based; AI explanation comes later) ----------
+// ---------- Risk scoring ----------
 function scoreRisk({ amount, buyerCountry, shipCountry }) {
   const reasons = [];
   let score = 0;
 
-  // Only learn "normal" behavior from low-risk or historical orders
-  const trusted = orders.filter(o => !o.risk);
+  // Learn "normal" behavior only from seed history and orders the seller approved
+  const trusted = orders.filter(o => !o.risk || o.status === 'approved');
 
   const knownCountries = new Set(trusted.map(o => o.buyerCountry));
   if (!knownCountries.has(buyerCountry)) {
@@ -84,10 +84,14 @@ function scoreRisk({ amount, buyerCountry, shipCountry }) {
     reasons.push(`First order ever from ${buyerCountry}`);
   }
 
-  const avg = trusted.reduce((s, o) => s + o.amount, 0) / trusted.length;
-  if (amount > avg * 3) {
+  const amounts = trusted.map(o => o.amount).sort((a, b) => a - b);
+  const mid = Math.floor(amounts.length / 2);
+  const typical = amounts.length % 2
+    ? amounts[mid]
+    : (amounts[mid - 1] + amounts[mid]) / 2;
+  if (amount > typical * 3) {
     score += 30;
-    reasons.push(`Amount $${amount} is over 3x the average ($${avg.toFixed(2)})`);
+    reasons.push(`Amount $${amount} is over 3x the typical order ($${typical.toFixed(2)})`);
   }
 
   if (buyerCountry !== shipCountry) {
@@ -124,7 +128,7 @@ app.post('/api/orders', async (req, res) => {
     // Score BEFORE adding this order, so it's compared against past history
     const risk = scoreRisk({ amount, buyerCountry, shipCountry });
     risk.aiSummary = await explainRisk({ amount, buyerCountry, shipCountry }, risk);
-    
+
     const paypal = await createPayPalOrder(amount);
 
     const order = {
@@ -134,6 +138,7 @@ app.post('/api/orders', async (req, res) => {
       buyerCountry,
       shipCountry,
       createdAt: Date.now(),
+      status: 'pending', // pending | approved | held
       risk,
     };
     orders.push(order);
@@ -142,6 +147,22 @@ app.post('/api/orders', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Seller decision: approve or hold an order
+app.post('/api/orders/:id/decision', (req, res) => {
+  const decision = req.body.decision;
+  if (!['approved', 'held'].includes(decision)) {
+    return res.status(400).json({ error: 'decision must be "approved" or "held"' });
+  }
+
+  const order = orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!order.risk) return res.status(400).json({ error: 'Historical orders cannot be changed' });
+
+  order.status = decision;
+  order.decidedAt = Date.now();
+  res.json(order);
 });
 
 const PORT = process.env.PORT || 3000;

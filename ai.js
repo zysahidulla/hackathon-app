@@ -11,7 +11,10 @@ Rules:
 - Be calm and specific. Mention the signals that matter most.
 - The seller makes the final decision, so phrase it as a recommendation.
 - Reply with ONLY a JSON object in this exact shape:
+- Never describe a country, region, or nationality as high-risk, suspicious, or associated with fraud. A new country is a signal only because it is new to this seller.
+- Do not say "likely fraud". Say what is unusual compared to this seller's normal orders.
 {"explanation": "2-3 sentences", "recommendation": "approve" | "review" | "hold"}`;
+
 
 function fallback(risk) {
   const recommendation =

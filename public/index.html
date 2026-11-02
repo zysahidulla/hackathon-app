@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Seller Shield</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
     form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
     input, button { padding: .5rem; font-size: 1rem; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #ddd; vertical-align: top; }
     .badge { padding: 2px 8px; border-radius: 8px; color: #fff; font-weight: 600; }
-    .LOW { background: #2e7d32; } .MEDIUM { background: #ef6c00; } .HIGH { background: #c62828; }
+    .LOW, .approved { background: #2e7d32; }
+    .MEDIUM { background: #ef6c00; }
+    .HIGH, .held { background: #c62828; }
+    .pending { background: #757575; }
+    .actions button { margin: 2px 4px 2px 0; cursor: pointer; }
     small { color: #555; }
   </style>
 </head>
@@ -29,44 +33,83 @@
 
   <table>
     <thead>
-      <tr><th>Time</th><th>Order ID</th><th>Amount</th><th>Buyer / Ship</th><th>Risk</th></tr>
+      <tr><th>Time</th><th>Order ID</th><th>Amount</th><th>Buyer / Ship</th><th>Risk</th><th>Decision</th></tr>
     </thead>
     <tbody id="rows"></tbody>
   </table>
 
   <script>
     const esc = s => String(s).replace(/[&<>"']/g, c =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function riskCell(o) {
+      if (!o.risk) return '<small>-</small>';
+      const ai = o.risk.aiSummary;
+      return `<span class="badge ${o.risk.level}">${o.risk.level} (${o.risk.score})</span>` +
+        (ai
+          ? `<br><strong>Suggested: ${esc(ai.recommendation)}</strong>
+             <br><small>${esc(ai.explanation)}</small>
+             <br><small><em>(${ai.source === 'ai' ? 'AI analysis' : 'rule-based'})</em></small>`
+          : `<br><small>${o.risk.reasons.map(esc).join('<br>') || 'No issues found'}</small>`);
+    }
+
+    function decisionCell(o) {
+      if (!o.risk) return '<small>-</small>';
+      const status = o.status || 'pending';
+      const approveBtn = status !== 'approved'
+        ? `<button data-id="${esc(o.id)}" data-decision="approved">Approve</button>` : '';
+      const holdBtn = status !== 'held'
+        ? `<button data-id="${esc(o.id)}" data-decision="held">Hold</button>` : '';
+      return `<span class="badge ${status}">${status.toUpperCase()}</span>
+              <div class="actions">${approveBtn}${holdBtn}</div>`;
+    }
 
     async function load() {
       const orders = await (await fetch('/api/orders')).json();
       document.getElementById('rows').innerHTML = orders.map(o => `
         <tr>
           <td>${new Date(o.createdAt).toLocaleString()}</td>
-          <td>${o.id}<br><small>${o.paypalStatus || 'historical'}</small></td>
+          <td>${esc(o.id)}<br><small>${esc(o.paypalStatus || 'historical')}</small></td>
           <td>$${Number(o.amount).toFixed(2)}</td>
-          <td>${o.buyerCountry} / ${o.shipCountry}</td>
-          <td>${o.risk
-            ? `<span class="badge ${o.risk.level}">${o.risk.level} (${o.risk.score})</span>
-                ${o.risk.aiSummary
-                ? `<br><strong>Suggested: ${esc(o.risk.aiSummary.recommendation)}</strong>
-                    <br><small>${esc(o.risk.aiSummary.explanation)}</small>
-                    <br><small><em>(${o.risk.aiSummary.source === 'ai' ? 'AI analysis' : 'rule-based'})</em></small>`
-                : `<br><small>${o.risk.reasons.join('<br>') || 'No issues found'}</small>`}`
-            : '<small>-</small>'}</td>
+          <td>${esc(o.buyerCountry)} / ${esc(o.shipCountry)}</td>
+          <td>${riskCell(o)}</td>
+          <td>${decisionCell(o)}</td>
         </tr>`).join('');
     }
+
+    // Approve / Hold button clicks
+    document.getElementById('rows').addEventListener('click', async e => {
+      const btn = e.target.closest('button[data-decision]');
+      if (!btn) return;
+      btn.disabled = true;
+      const res = await fetch(`/api/orders/${encodeURIComponent(btn.dataset.id)}/decision`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision: btn.dataset.decision }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        document.getElementById('msg').textContent = 'Error: ' + data.error;
+      }
+      load();
+    });
 
     document.getElementById('orderForm').addEventListener('submit', async e => {
       e.preventDefault();
       const body = Object.fromEntries(new FormData(e.target));
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      document.getElementById('msg').textContent = res.ok ? '' : 'Error: ' + data.error;
+      const submit = e.target.querySelector('button');
+      submit.disabled = true;
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        document.getElementById('msg').textContent = res.ok ? '' : 'Error: ' + data.error;
+      } finally {
+        submit.disabled = false;
+      }
       load();
     });
 
