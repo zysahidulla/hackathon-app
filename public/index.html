@@ -37,7 +37,7 @@
   <script>
     const esc = s => String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    
+
     async function load() {
       const orders = await (await fetch('/api/orders')).json();
       document.getElementById('rows').innerHTML = orders.map(o => `
@@ -48,7 +48,11 @@
           <td>${o.buyerCountry} / ${o.shipCountry}</td>
           <td>${o.risk
             ? `<span class="badge ${o.risk.level}">${o.risk.level} (${o.risk.score})</span>
-               <br><small>${o.risk.reasons.join('<br>') || 'No issues found'}</small>`
+                ${o.risk.aiSummary
+                ? `<br><strong>Suggested: ${esc(o.risk.aiSummary.recommendation)}</strong>
+                    <br><small>${esc(o.risk.aiSummary.explanation)}</small>
+                    <br><small><em>(${o.risk.aiSummary.source === 'ai' ? 'AI analysis' : 'rule-based'})</em></small>`
+                : `<br><small>${o.risk.reasons.join('<br>') || 'No issues found'}</small>`}`
             : '<small>-</small>'}</td>
         </tr>`).join('');
     }
