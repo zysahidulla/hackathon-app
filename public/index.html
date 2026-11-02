@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Seller Shield</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
     form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
     input, button { padding: .5rem; font-size: 1rem; }
     table { width: 100%; border-collapse: collapse; }
@@ -15,7 +15,9 @@
     .MEDIUM { background: #ef6c00; }
     .HIGH, .held { background: #c62828; }
     .pending { background: #757575; }
+    .actions { margin-top: 4px; }
     .actions button { margin: 2px 4px 2px 0; cursor: pointer; }
+    .actions a { margin-right: 8px; }
     small { color: #555; }
   </style>
 </head>
@@ -56,11 +58,29 @@
     function decisionCell(o) {
       if (!o.risk) return '<small>-</small>';
       const status = o.status || 'pending';
+      const captured = o.paypalStatus === 'COMPLETED';
+      const id = esc(o.id);
+
+      let extra = '';
+      if (status === 'approved') {
+        if (captured) {
+          extra = `<div><small>Payment captured${o.captureId ? ' (' + esc(o.captureId) + ')' : ''}</small></div>`;
+        } else {
+          extra = `<div><small>${esc(o.captureMessage || 'Capture not attempted yet.')}</small></div>
+            <div class="actions">
+              ${o.approveUrl ? `<a href="${esc(o.approveUrl)}" target="_blank" rel="noopener">Open buyer approval</a>` : ''}
+              <button data-id="${id}" data-capture="1">Retry capture</button>
+            </div>`;
+        }
+      }
+
       const approveBtn = status !== 'approved'
-        ? `<button data-id="${esc(o.id)}" data-decision="approved">Approve</button>` : '';
-      const holdBtn = status !== 'held'
-        ? `<button data-id="${esc(o.id)}" data-decision="held">Hold</button>` : '';
+        ? `<button data-id="${id}" data-decision="approved">Approve</button>` : '';
+      const holdBtn = status !== 'held' && !captured
+        ? `<button data-id="${id}" data-decision="held">Hold</button>` : '';
+
       return `<span class="badge ${status}">${status.toUpperCase()}</span>
+              ${extra}
               <div class="actions">${approveBtn}${holdBtn}</div>`;
     }
 
@@ -77,19 +97,27 @@
         </tr>`).join('');
     }
 
-    // Approve / Hold button clicks
+    // Approve / Hold / Retry capture button clicks
     document.getElementById('rows').addEventListener('click', async e => {
-      const btn = e.target.closest('button[data-decision]');
+      const btn = e.target.closest('button[data-id]');
       if (!btn) return;
       btn.disabled = true;
-      const res = await fetch(`/api/orders/${encodeURIComponent(btn.dataset.id)}/decision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision: btn.dataset.decision }),
-      });
+
+      const id = encodeURIComponent(btn.dataset.id);
+      const isCapture = !!btn.dataset.capture;
+      const res = await fetch(
+        isCapture ? `/api/orders/${id}/capture` : `/api/orders/${id}/decision`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(isCapture ? {} : { decision: btn.dataset.decision }),
+        }
+      );
       if (!res.ok) {
         const data = await res.json();
         document.getElementById('msg').textContent = 'Error: ' + data.error;
+      } else {
+        document.getElementById('msg').textContent = '';
       }
       load();
     });
