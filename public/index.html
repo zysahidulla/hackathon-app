@@ -29,8 +29,9 @@
     <div class="hero-inner">
       <h1>Orders</h1>
       <p class="lede">
-        Test orders are created in the real PayPal sandbox. Buyer countries and past sales are simulated,
-        because the sandbox has no real buyer data.
+        Orders are created in the real PayPal sandbox. After your sandbox buyer pays, Seller Shield reads the
+        buyer and shipping details from PayPal and scores the order before any money is captured.
+        Past sales are simulated.
       </p>
     </div>
   </section>
@@ -39,29 +40,40 @@
     <section class="panel" aria-labelledby="add-title">
       <h2 id="add-title">Add a test order</h2>
       <form id="orderForm">
-        <div class="form-grid">
+        <div class="form-grid form-grid-2">
           <div>
             <label for="amount">Amount (USD)</label>
             <input id="amount" name="amount" type="number" step="0.01" min="0.01" placeholder="30" required />
           </div>
           <div>
-            <label for="buyerCountry">Buyer country</label>
-            <input id="buyerCountry" name="buyerCountry" maxlength="2" placeholder="PH" autocomplete="off" autocapitalize="characters" required />
+            <label for="item">Item</label>
+            <input id="item" name="item" maxlength="120" placeholder="Phone case" autocomplete="off" />
           </div>
-          <div>
-            <label for="shipCountry">Ship-to country</label>
-            <input id="shipCountry" name="shipCountry" maxlength="2" placeholder="PH" autocomplete="off" autocapitalize="characters" required />
-          </div>
-          <button class="btn btn-primary" type="submit" id="createBtn">Create and score order</button>
+          <button class="btn btn-primary" type="submit" id="createBtn">Create PayPal order</button>
         </div>
       </form>
       <div class="quick">
         <span>Fill in an example:</span>
-        <button class="btn btn-quiet btn-small" type="button" data-fill="30,PH,PH">Typical order</button>
-        <button class="btn btn-quiet btn-small" type="button" data-fill="500,NG,PH">Suspicious order</button>
+        <button class="btn btn-quiet btn-small" type="button" data-fill="30|Phone case">Typical order</button>
+        <button class="btn btn-quiet btn-small" type="button" data-fill="500|Smartwatch">Large order</button>
       </div>
+      <p class="hint">
+        The buyer's country and shipping address come from the sandbox buyer account that pays.
+        To test a different country, pay with a sandbox Personal account created for that country.
+      </p>
       <p class="msg" id="msg" role="status" aria-live="polite"></p>
     </section>
+
+    <div class="section-head">
+      <h2>Waiting for buyer payment</h2>
+      <span class="count" id="awaitingCount"></span>
+      <button class="btn btn-quiet btn-small push-right" type="button" id="checkBtn">Check PayPal</button>
+    </div>
+    <p class="hint">
+      Open the buyer checkout, log in as your sandbox Personal account, and pay. When you come back,
+      the order is scored automatically. No money is captured until you approve it.
+    </p>
+    <div class="queue" id="awaiting"></div>
 
     <div class="section-head">
       <h2>Needs your decision</h2>
@@ -103,6 +115,33 @@
 
     const LEVEL_LABEL = { LOW: 'Low risk', MEDIUM: 'Medium risk', HIGH: 'High risk' };
     const STATUS_LABEL = { pending: 'Awaiting your decision', approved: 'Approved', held: 'Held' };
+
+    function awaitingHtml(o) {
+      return `
+        <article class="order">
+          <div>
+            <div class="amount">${money(o.amount)}</div>
+            <div class="route">${esc(o.item || 'Test order')}</div>
+            <div class="meta">${when(o.createdAt)}<br>Order ${esc(o.id)}<br>PayPal status: ${esc(o.paypalStatus || 'unknown')}</div>
+          </div>
+          <div>
+            <p class="verdict">Waiting for the buyer to pay on PayPal</p>
+            <p class="source">The buyer's details and risk score appear here after they pay.</p>
+          </div>
+          <div>
+            <span class="pill pill-pending">Awaiting buyer</span>
+            <div class="btn-row">
+              ${o.approveUrl ? `<a class="btn btn-primary btn-small btn-link" href="${esc(o.approveUrl)}" target="_blank" rel="noopener">Open buyer checkout</a>` : ''}
+            </div>
+          </div>
+        </article>`;
+    }
+
+    function buyerLine(o) {
+      const who = o.buyer?.name || o.buyer?.email;
+      const where = `in ${esc(o.buyerCountry || '?')}, shipping to ${esc(o.shipTo || o.shipCountry || '?')}`;
+      return who ? `${esc(who)} ${where}` : `Buyer ${where}`;
+    }
 
     function showMessage(text, isError) {
       const el = $('msg');
@@ -150,8 +189,11 @@
         <article class="order risk-${esc(level)}">
           <div>
             <div class="amount">${money(o.amount)}</div>
-            <div class="route">Buyer in ${esc(o.buyerCountry)}, shipping to ${esc(o.shipCountry)}</div>
-            <div class="meta">${when(o.createdAt)}<br>Order ${id}<br>PayPal status: ${esc(o.paypalStatus || 'unknown')}</div>
+            <div class="route">${buyerLine(o)}</div>
+            <div class="meta">
+              ${o.item ? esc(o.item) + '<br>' : ''}${when(o.createdAt)}<br>Order ${id}<br>PayPal status: ${esc(o.paypalStatus || 'unknown')}
+              ${o.buyer?.email ? '<br>Buyer details from PayPal' : ''}
+            </div>
           </div>
           <div>
             <div class="risk-head">
@@ -174,18 +216,35 @@
     }
 
     async function load() {
-      const orders = await (await fetch('/api/orders')).json();
-      const scored = orders.filter(o => o.risk);
-      const history = orders.filter(o => !o.risk);
-      const waiting = scored.filter(o => (o.status || 'pending') === 'pending');
-      const decided = scored.filter(o => (o.status || 'pending') !== 'pending');
+      // Sync asks PayPal whether any waiting buyers have paid, then returns all orders
+      const checkBtn = $('checkBtn');
+      checkBtn.disabled = true;
+      let orders;
+      try {
+        orders = await (await fetch('/api/orders/sync', { method: 'POST' })).json();
+      } catch {
+        showMessage('Could not reach the server. Check that it is still running.', true);
+        return;
+      } finally {
+        checkBtn.disabled = false;
+      }
+      const history = orders.filter(o => o.history);
+      const awaiting = orders.filter(o => o.status === 'awaiting_buyer');
+      const scored = orders.filter(o => !o.history && o.risk);
+      const waiting = scored.filter(o => o.status === 'pending');
+      const decided = scored.filter(o => o.status !== 'pending');
+
+      $('awaitingCount').textContent = awaiting.length ? `${awaiting.length} order${awaiting.length === 1 ? '' : 's'}` : '';
+      $('awaiting').innerHTML = awaiting.length
+        ? awaiting.map(awaitingHtml).join('')
+        : '<p class="empty">No orders are waiting for payment. Create one above to get a buyer checkout link.</p>';
 
       $('waitingCount').textContent = waiting.length ? `${waiting.length} order${waiting.length === 1 ? '' : 's'}` : '';
       $('decidedCount').textContent = decided.length ? `${decided.length} order${decided.length === 1 ? '' : 's'}` : '';
 
       $('waiting').innerHTML = waiting.length
         ? waiting.map(orderHtml).join('')
-        : '<p class="empty">Nothing is waiting. Add a test order above to see how it is scored.</p>';
+        : '<p class="empty">Nothing needs a decision. Paid orders are scored and appear here.</p>';
       $('decided').innerHTML = decided.length
         ? decided.map(orderHtml).join('')
         : '<p class="empty">Orders you approve or hold appear here.</p>';
@@ -202,10 +261,9 @@
     document.addEventListener('click', async e => {
       const fill = e.target.closest('button[data-fill]');
       if (fill) {
-        const [amount, buyer, ship] = fill.dataset.fill.split(',');
+        const [amount, item] = fill.dataset.fill.split('|');
         $('amount').value = amount;
-        $('buyerCountry').value = buyer;
-        $('shipCountry').value = ship;
+        $('item').value = item;
         return;
       }
 
@@ -240,7 +298,7 @@
       const body = Object.fromEntries(new FormData(e.target));
       const btn = $('createBtn');
       btn.disabled = true;
-      btn.textContent = 'Scoring order…';
+      btn.textContent = 'Creating order…';
       try {
         const res = await fetch('/api/orders', {
           method: 'POST',
@@ -248,15 +306,23 @@
           body: JSON.stringify(body),
         });
         const data = await res.json();
-        if (res.ok) showMessage('Order scored.', false);
-        else showMessage(data.error || 'Could not create the order.', true);
+        if (res.ok) {
+          showMessage('PayPal order created. Open the buyer checkout below and pay as your sandbox buyer.', false);
+          e.target.reset();
+        } else showMessage(data.error || 'Could not create the order.', true);
       } catch {
         showMessage('Could not reach the server. Check that it is still running.', true);
       } finally {
         btn.disabled = false;
-        btn.textContent = 'Create and score order';
+        btn.textContent = 'Create PayPal order';
       }
       load();
+    });
+
+    $('checkBtn').addEventListener('click', load);
+    // Coming back from the PayPal checkout tab: check whether the buyer paid
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') load();
     });
 
     load();

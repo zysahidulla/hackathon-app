@@ -40,7 +40,7 @@ async function getAccessToken() {
   return cached.token;
 }
 
-async function createPayPalOrder(amount) {
+async function createPayPalOrder(amount, item) {
   const token = await getAccessToken();
   const res = await fetch(`${BASE}/v2/checkout/orders`, {
     method: 'POST',
@@ -53,17 +53,18 @@ async function createPayPalOrder(amount) {
       intent: 'CAPTURE',
       purchase_units: [
         {
-          description: 'Hackathon test order',
+          description: item || 'Hackathon test order',
           amount: { currency_code: 'USD', value: amount.toFixed(2) },
         },
       ],
-      // Gives us a buyer-approval link and sends the buyer back to the dashboard afterward
+      // Gives us a buyer-approval link and sends the buyer back to the dashboard afterward.
+      // GET_FROM_FILE uses the shipping address saved on the buyer's PayPal account.
       payment_source: {
         paypal: {
           experience_context: {
             brand_name: 'Seller Shield (sandbox)',
             user_action: 'PAY_NOW',
-            shipping_preference: 'NO_SHIPPING',
+            shipping_preference: 'GET_FROM_FILE',
             return_url: `${APP_URL}/`,
             cancel_url: `${APP_URL}/`,
           },
@@ -74,6 +75,17 @@ async function createPayPalOrder(amount) {
   const data = await res.json();
   if (!res.ok) throw new Error(`Create order failed: ${JSON.stringify(data)}`);
   return data; // contains id, status, links
+}
+
+// Order details, including the buyer and shipping address once the buyer has approved
+async function getPayPalOrder(orderId) {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/v2/checkout/orders/${orderId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Get order failed: ${JSON.stringify(data)}`);
+  return data;
 }
 
 async function capturePayPalOrder(orderId) {
@@ -143,10 +155,10 @@ async function tryCapture(order) {
 // ---------- Fake order history (simulated past transactions) ----------
 const DAY = 24 * 60 * 60 * 1000;
 const orders = [
-  { id: 'seed-1', amount: 25, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 5 * DAY },
-  { id: 'seed-2', amount: 40, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 4 * DAY },
-  { id: 'seed-3', amount: 30, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 2 * DAY },
-  { id: 'seed-4', amount: 35, buyerCountry: 'SG', shipCountry: 'SG', createdAt: Date.now() - 1 * DAY },
+  { id: 'seed-1', history: true, amount: 25, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 5 * DAY },
+  { id: 'seed-2', history: true, amount: 40, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 4 * DAY },
+  { id: 'seed-3', history: true, amount: 30, buyerCountry: 'PH', shipCountry: 'PH', createdAt: Date.now() - 2 * DAY },
+  { id: 'seed-4', history: true, amount: 35, buyerCountry: 'SG', shipCountry: 'SG', createdAt: Date.now() - 1 * DAY },
 ];
 
 // ---------- Distance helper (approximate country-center coordinates) ----------
@@ -179,7 +191,7 @@ function scoreRisk({ amount, buyerCountry, shipCountry }) {
   let score = 0;
 
   // Learn "normal" behavior only from seed history and orders the seller approved
-  const trusted = orders.filter(o => !o.risk || o.status === 'approved');
+  const trusted = orders.filter(o => o.history || o.status === 'approved');
 
   // Signal 1: new buyer country
   const knownCountries = new Set(trusted.map(o => o.buyerCountry));
@@ -248,21 +260,50 @@ app.get('/api/orders', (req, res) => {
 
 
 
+// Once the buyer has approved on PayPal, read who they are and where it ships, then score it.
+// Never throws; orders still waiting for the buyer are left as they are.
+async function syncOrder(order) {
+  if (order.status !== 'awaiting_buyer') return;
+  try {
+    const data = await getPayPalOrder(order.id);
+    order.paypalStatus = data.status;
+    if (data.status !== 'APPROVED' && data.status !== 'COMPLETED') return;
+
+    const payer = data.payment_source?.paypal || data.payer || {};
+    const shipping = data.purchase_units?.[0]?.shipping;
+    order.buyer = {
+      name: [payer.name?.given_name, payer.name?.surname].filter(Boolean).join(' ') || null,
+      email: payer.email_address || null,
+      payerId: payer.account_id || payer.payer_id || null,
+    };
+    order.buyerCountry = payer.address?.country_code || shipping?.address?.country_code || null;
+    order.shipCountry = shipping?.address?.country_code || order.buyerCountry;
+    order.shipTo = shipping?.address
+      ? [shipping.address.admin_area_2, shipping.address.country_code].filter(Boolean).join(', ')
+      : null;
+    order.paidAt = Date.now();
+
+    const { amount, buyerCountry, shipCountry } = order;
+    const risk = scoreRisk({ amount, buyerCountry, shipCountry });
+    risk.aiSummary = await explainRisk({ amount, buyerCountry, shipCountry }, risk);
+    order.risk = risk;
+    order.status = 'pending'; // now waiting for the seller's decision
+  } catch (err) {
+    console.error('Sync error:', err.message);
+  }
+}
+
+// Seller creates an order; the buyer pays on PayPal before it is scored
 app.post('/api/orders', async (req, res) => {
   try {
     const amount = Number(req.body.amount);
-    const buyerCountry = String(req.body.buyerCountry || '').toUpperCase().slice(0, 2);
-    const shipCountry = String(req.body.shipCountry || '').toUpperCase().slice(0, 2);
+    const item = String(req.body.item || '').trim().slice(0, 120);
 
-    if (!(amount > 0) || !buyerCountry || !shipCountry) {
-      return res.status(400).json({ error: 'amount, buyerCountry, shipCountry are required' });
+    if (!(amount > 0)) {
+      return res.status(400).json({ error: 'amount is required' });
     }
 
-    // Score BEFORE adding this order, so it's compared against past history
-    const risk = scoreRisk({ amount, buyerCountry, shipCountry });
-    risk.aiSummary = await explainRisk({ amount, buyerCountry, shipCountry }, risk);
-
-    const paypal = await createPayPalOrder(amount);
+    const paypal = await createPayPalOrder(amount, item);
     const approveUrl = (paypal.links || []).find(
       l => l.rel === 'payer-action' || l.rel === 'approve'
     )?.href;
@@ -272,11 +313,9 @@ app.post('/api/orders', async (req, res) => {
       paypalStatus: paypal.status,
       approveUrl,
       amount,
-      buyerCountry,
-      shipCountry,
+      item: item || null,
       createdAt: Date.now(),
-      status: 'pending', // pending | approved | held
-      risk,
+      status: 'awaiting_buyer', // awaiting_buyer | pending | approved | held
     };
     orders.push(order);
     res.json(order);
@@ -284,6 +323,12 @@ app.post('/api/orders', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// Ask PayPal about orders still waiting for the buyer, score the ones that were paid
+app.post('/api/orders/sync', async (req, res) => {
+  await Promise.all(orders.map(syncOrder));
+  res.json([...orders].sort((a, b) => b.createdAt - a.createdAt));
 });
 
 // Seller decision: approve (and try to capture payment) or hold
@@ -295,7 +340,10 @@ app.post('/api/orders/:id/decision', async (req, res) => {
 
   const order = orders.find(o => o.id === req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
-  if (!order.risk) return res.status(400).json({ error: 'Historical orders cannot be changed' });
+  if (order.history) return res.status(400).json({ error: 'Historical orders cannot be changed' });
+  if (order.status === 'awaiting_buyer') {
+    return res.status(400).json({ error: 'The buyer has not paid on PayPal yet' });
+  }
   if (decision === 'held' && order.paypalStatus === 'COMPLETED') {
     return res.status(400).json({ error: 'Payment already captured; a refund would be needed' });
   }
@@ -312,7 +360,7 @@ app.post('/api/orders/:id/decision', async (req, res) => {
 // Retry capture (after the buyer has approved on PayPal)
 app.post('/api/orders/:id/capture', async (req, res) => {
   const order = orders.find(o => o.id === req.params.id);
-  if (!order || !order.risk) return res.status(404).json({ error: 'Order not found' });
+  if (!order || order.history) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'approved') {
     return res.status(400).json({ error: 'Approve the order before capturing payment' });
   }
