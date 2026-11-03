@@ -2,6 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const { explainRisk } = require('./ai');
+const { buildEvidencePacket } = require('./evidence');
+const { buildMockContext } = require('./data/mockContext');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
@@ -161,6 +165,22 @@ const orders = [
   { id: 'seed-4', history: true, amount: 35, buyerCountry: 'SG', shipCountry: 'SG', createdAt: Date.now() - 1 * DAY },
 ];
 
+// ---------- Save orders to disk so a restart does not lose them ----------
+const ORDERS_FILE = path.join(__dirname, 'data', 'orders.json');
+
+function saveOrders() {
+  try {
+    fs.mkdirSync(path.dirname(ORDERS_FILE), { recursive: true });
+    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders.filter(o => !o.history), null, 2));
+  } catch (err) {
+    console.error('Could not save orders:', err.message);
+  }
+}
+
+try {
+  orders.push(...JSON.parse(fs.readFileSync(ORDERS_FILE, 'utf8')));
+} catch { /* no saved orders yet */ }
+
 // ---------- Distance helper (approximate country-center coordinates) ----------
 const COUNTRY_COORDS = {
   PH: [12.9, 121.8], SG: [1.35, 103.8], MY: [4.2, 101.9], ID: [-0.8, 113.9],
@@ -258,8 +278,6 @@ app.get('/api/orders', (req, res) => {
   res.json([...orders].sort((a, b) => b.createdAt - a.createdAt));
 });
 
-
-
 // Once the buyer has approved on PayPal, read who they are and where it ships, then score it.
 // Never throws; orders still waiting for the buyer are left as they are.
 async function syncOrder(order) {
@@ -318,6 +336,7 @@ app.post('/api/orders', async (req, res) => {
       status: 'awaiting_buyer', // awaiting_buyer | pending | approved | held
     };
     orders.push(order);
+    saveOrders();
     res.json(order);
   } catch (err) {
     console.error(err);
@@ -328,6 +347,7 @@ app.post('/api/orders', async (req, res) => {
 // Ask PayPal about orders still waiting for the buyer, score the ones that were paid
 app.post('/api/orders/sync', async (req, res) => {
   await Promise.all(orders.map(syncOrder));
+  saveOrders();
   res.json([...orders].sort((a, b) => b.createdAt - a.createdAt));
 });
 
@@ -354,6 +374,7 @@ app.post('/api/orders/:id/decision', async (req, res) => {
   if (decision === 'approved' && order.paypalStatus !== 'COMPLETED') {
     await tryCapture(order);
   }
+  saveOrders();
   res.json(order);
 });
 
@@ -365,6 +386,7 @@ app.post('/api/orders/:id/capture', async (req, res) => {
     return res.status(400).json({ error: 'Approve the order before capturing payment' });
   }
   if (order.paypalStatus !== 'COMPLETED') await tryCapture(order);
+  saveOrders();
   res.json(order);
 });
 
@@ -385,5 +407,141 @@ app.get('/api/disputes', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ---------- Dispute evidence and response ----------
+const DISPUTE_ID = /^[A-Za-z0-9-]{3,64}$/;
+
+function orderForDispute(d) {
+  const captureId = d.disputed_transactions?.[0]?.seller_transaction_id;
+  return orders.find(o => o.captureId && o.captureId === captureId) || null;
+}
+
+async function paypalPost(path, { json, form } = {}) {
+  const token = await getAccessToken();
+  const headers = { Authorization: `Bearer ${token}` };
+  let body;
+  if (json) {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(json);
+  } else if (form) {
+    body = form; // fetch adds the multipart boundary itself
+  }
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers, body });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { /* non-JSON reply */ }
+  return { ok: res.ok, data };
+}
+
+// provide-evidence needs multipart/form-data with the "input" part labeled as JSON
+async function paypalProvideEvidence(disputeId, input) {
+  const token = await getAccessToken();
+  const boundary = '----SellerShield' + crypto.randomBytes(12).toString('hex');
+  const body =
+    `--${boundary}\r\n` +
+    'Content-Disposition: form-data; name="input"\r\n' +
+    'Content-Type: application/json\r\n\r\n' +
+    JSON.stringify(input) + '\r\n' +
+    `--${boundary}--\r\n`;
+
+  const res = await fetch(`${BASE}/v1/customer/disputes/${disputeId}/provide-evidence`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { /* non-JSON reply */ }
+  return { ok: res.ok, data };
+}
+
+function paypalErrorText(data) {
+  return data.details?.[0]?.description || data.details?.[0]?.issue || data.message || 'PayPal rejected the request.';
+}
+
+// Build the evidence packet for one dispute
+app.post('/api/disputes/:id/evidence', async (req, res) => {
+  const id = req.params.id;
+  if (!DISPUTE_ID.test(id)) return res.status(400).json({ error: 'Invalid dispute ID.' });
+  try {
+    const dispute = await getPayPalDispute(id);
+    const packet = await buildEvidencePacket(dispute, orderForDispute(dispute));
+    res.json(packet);
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Send the seller's reply to PayPal. The endpoint depends on the dispute stage.
+// Send the seller's response to PayPal. If PayPal asked for evidence, send evidence; otherwise send a message.
+// Send the seller's response to PayPal: evidence if PayPal asked for it and we have shipping data, otherwise a message
+app.post('/api/disputes/:id/submit', async (req, res) => {
+  const id = req.params.id;
+  const reply = String(req.body?.reply || '').trim();
+  if (!DISPUTE_ID.test(id)) return res.status(400).json({ error: 'Invalid dispute ID.' });
+  if (!reply) return res.status(400).json({ error: 'Write a reply before submitting.' });
+  if (reply.length > 2000) return res.status(400).json({ error: 'The reply is too long. Keep it under 2,000 characters.' });
+
+  try {
+    const dispute = await getPayPalDispute(id);
+
+    const actionable =
+      dispute.status === 'WAITING_FOR_SELLER_RESPONSE' ||
+      (dispute.dispute_life_cycle_stage === 'INQUIRY' &&
+        ['OPEN', 'WAITING_FOR_BUYER_RESPONSE'].includes(dispute.status));
+    if (!actionable) {
+      return res.status(400).json({ error: 'This dispute is not waiting for your response.' });
+    }
+
+    const canProvideEvidence = (dispute.links || []).some(l => l.rel === 'provide_evidence');
+    const requested = (dispute.evidences || []).find(e => e.source === 'REQUESTED_FROM_SELLER');
+    const wantsTracking = requested?.evidence_type === 'PROOF_OF_FULFILLMENT';
+    const { tracking } = buildMockContext(orderForDispute(dispute), dispute);
+
+    // Evidence path: only when PayPal asked for proof of fulfillment AND we have shipping data for it
+    if (canProvideEvidence && wantsTracking && tracking) {
+      const evidence = {
+        evidence_type: 'PROOF_OF_FULFILLMENT',
+        notes: reply,
+        evidence_info: {
+          tracking_info: [{ carrier_name: tracking.carrier, tracking_number: tracking.number }],
+        },
+      };
+      const r = await paypalProvideEvidence(id, { evidences: [evidence] });
+      if (!r.ok) {
+        console.error('provide-evidence error:', JSON.stringify(r.data));
+        return res.status(502).json({ error: `PayPal: ${paypalErrorText(r.data)}` });
+      }
+      return res.json({ message: 'Your evidence was sent to PayPal.' });
+    }
+
+    // Inquiry stage: message the buyer
+    if (dispute.dispute_life_cycle_stage === 'INQUIRY') {
+      const r = await paypalPost(`/v1/customer/disputes/${id}/send-message`, { json: { message: reply } });
+      if (!r.ok) {
+        console.error('send-message error:', JSON.stringify(r.data));
+        return res.status(502).json({ error: `PayPal: ${paypalErrorText(r.data)}` });
+      }
+      const noRecord = canProvideEvidence && wantsTracking && !tracking;
+      return res.json({
+        message: noRecord
+          ? 'Your reply was sent to the buyer. No shipping record was found for this dispute, so no tracking evidence was attached.'
+          : 'Your reply was sent to the buyer through PayPal.',
+      });
+    }
+
+    res.status(400).json({ error: 'PayPal is not accepting a response for this dispute right now.' });
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Unknown /api routes return JSON, so the pages never get an HTML error page
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 app.listen(PORT, () => console.log(`Running on ${APP_URL} (AI step enabled)`));
