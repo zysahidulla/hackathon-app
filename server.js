@@ -90,6 +90,27 @@ async function capturePayPalOrder(orderId) {
   return { ok: res.ok, data };
 }
 
+async function listPayPalDisputes() {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/v1/customer/disputes?page_size=50`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`List disputes failed: ${JSON.stringify(data)}`);
+  return data.items || [];
+}
+
+// Full details (the list above leaves out fields like the buyer's messages)
+async function getPayPalDispute(disputeId) {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/v1/customer/disputes/${disputeId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Get dispute failed: ${JSON.stringify(data)}`);
+  return data;
+}
+
 // Tries to capture and records the outcome on the order (never throws)
 async function tryCapture(order) {
   try {
@@ -225,6 +246,8 @@ app.get('/api/orders', (req, res) => {
   res.json([...orders].sort((a, b) => b.createdAt - a.createdAt));
 });
 
+
+
 app.post('/api/orders', async (req, res) => {
   try {
     const amount = Number(req.body.amount);
@@ -295,6 +318,24 @@ app.post('/api/orders/:id/capture', async (req, res) => {
   }
   if (order.paypalStatus !== 'COMPLETED') await tryCapture(order);
   res.json(order);
+});
+
+// Disputes from PayPal, each matched to its Seller Shield order by capture ID
+app.get('/api/disputes', async (req, res) => {
+  try {
+    const list = await listPayPalDisputes();
+    const disputes = await Promise.all(list.map(d => getPayPalDispute(d.dispute_id)));
+
+    const withOrders = disputes.map(d => {
+      const captureId = d.disputed_transactions?.[0]?.seller_transaction_id;
+      const order = orders.find(o => o.captureId && o.captureId === captureId) || null;
+      return { ...d, order };
+    });
+    res.json(withOrders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => console.log(`Running on ${APP_URL} (AI step enabled)`));
