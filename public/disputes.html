@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Disputes - Seller Shield</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    /* Disputes-only additions, built on the shared tokens in styles.css */
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .panel .hint { margin-top: 8px; }
+    .reason { font-weight: 700; color: var(--navy-deep); margin: 2px 0 8px; }
+    .linked-label { font-size: 0.8125rem; font-weight: 600; color: var(--ink-2); margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .quote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--line); color: var(--ink); font-style: italic; }
+    .pill-urgent { background: var(--danger-bg); color: var(--danger-ink); }
+    .pill-soon { background: var(--caution-bg); color: var(--caution-ink); }
+    .pill-ok { background: var(--blue-tint); color: var(--navy); }
+    .no-link { border-left-color: var(--line); }
+
+    .packet {
+      grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 18px; margin-top: 4px;
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 24px;
+    }
+    .packet h3 { font-size: 0.95rem; margin: 0 0 8px; color: var(--navy-deep); }
+    .packet section + section { margin-top: 18px; }
+    .facts { margin: 0; padding-left: 20px; }
+    .facts li { margin-bottom: 4px; }
+    .facts .ok::marker { color: var(--safe); }
+    .facts .missing::marker { color: var(--danger); }
+    .timeline { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--line); }
+    .timeline li { position: relative; padding: 0 0 12px 16px; font-size: 0.9rem; }
+    .timeline li::before {
+      content: ''; position: absolute; left: -6px; top: 6px; width: 10px; height: 10px;
+      border-radius: 50%; background: var(--blue);
+    }
+    .timeline time { display: block; color: var(--ink-2); font-size: 0.8125rem; }
+    textarea {
+      font: inherit; width: 100%; min-height: 220px; padding: 12px; resize: vertical;
+      border: 1px solid #8f9aa1; border-radius: 8px; background: #fff; color: var(--ink); line-height: 1.55;
+    }
+    textarea:hover { border-color: var(--ink-2); }
+    @media (max-width: 820px) {
+      .packet { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <svg width="22" height="24" viewBox="0 0 20 22" aria-hidden="true">
+          <path d="M10 1 2 4v6c0 5 3.4 9.3 8 11 4.6-1.7 8-6 8-11V4z" fill="none" stroke="#0070e0" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+        Seller Shield
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="/">Orders</a>
+        <a href="/disputes.html" aria-current="page">Disputes</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-inner">
+      <h1>Disputes</h1>
+      <p class="lede">
+        Disputes come from the real PayPal sandbox. Seller Shield matches each one to its order, adds the risk
+        score from checkout, and drafts your response. Nothing is sent to PayPal until you submit it.
+      </p>
+    </div>
+  </section>
+
+  <main class="page">
+    <section class="panel" aria-labelledby="sync-title">
+      <div class="panel-head">
+        <h2 id="sync-title">Disputes from PayPal</h2>
+        <button class="btn btn-quiet btn-small" type="button" id="refreshBtn">Refresh from PayPal</button>
+      </div>
+      <p class="hint">
+        To test, log in to sandbox.paypal.com as your sandbox buyer and open a dispute on a payment
+        captured in Seller Shield. It can take a few minutes to show up here.
+      </p>
+      <p class="msg" id="msg" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="section-head">
+      <h2>Needs your response</h2>
+      <span class="count" id="openCount"></span>
+    </div>
+    <p class="hint">Sorted by deadline. Click <strong>Build evidence</strong> to gather the facts and draft a reply.</p>
+    <div class="queue" id="open"></div>
+
+    <div class="section-head">
+      <h2>Other disputes</h2>
+      <span class="count" id="otherCount"></span>
+    </div>
+    <div class="queue" id="other"></div>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const money = (v, cur) => (cur && cur !== 'USD' ? cur + ' ' : '$') + Number(v).toFixed(2);
+    const when = ts => new Date(ts).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    const day = ts => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const words = s => String(s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+
+    const REASON_LABEL = {
+      MERCHANDISE_OR_SERVICE_NOT_RECEIVED: 'Item not received',
+      MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED: 'Item not as described',
+      UNAUTHORISED: 'Unauthorized purchase',
+      CREDIT_NOT_PROCESSED: 'Refund not processed',
+      DUPLICATE_TRANSACTION: 'Duplicate charge',
+      INCORRECT_AMOUNT: 'Incorrect amount',
+    };
+    const STATUS_LABEL = {
+      WAITING_FOR_SELLER_RESPONSE: 'Waiting for your response',
+      WAITING_FOR_BUYER_RESPONSE: 'Waiting for the buyer',
+      UNDER_REVIEW: 'PayPal is reviewing',
+      RESOLVED: 'Resolved',
+      OPEN: 'Open',
+    };
+    const LEVEL_LABEL = { LOW: 'Low risk', MEDIUM: 'Medium risk', HIGH: 'High risk' };
+
+    const packets = {}; 
+
+    function showMessage(text, isError) {
+      const el = $('msg');
+      el.textContent = text;
+      el.className = isError ? 'msg error' : 'msg';
+    }
+
+    function daysLeft(d) {
+      if (typeof d.daysLeft === 'number') return d.daysLeft;
+      if (!d.seller_response_due_date) return null;
+      return Math.ceil((new Date(d.seller_response_due_date) - Date.now()) / 86400000);
+    }
+
+    function deadlinePill(d) {
+      const left = daysLeft(d);
+      if (d.status !== 'WAITING_FOR_SELLER_RESPONSE' || left === null) {
+        return `<span class="pill pill-pending">${esc(STATUS_LABEL[d.status] || words(d.status))}</span>`;
+      }
+      const cls = left <= 3 ? 'pill-urgent' : left <= 7 ? 'pill-soon' : 'pill-ok';
+      const text = left < 0 ? 'Deadline passed' : left === 0 ? 'Due today' : `${left} day${left === 1 ? '' : 's'} left`;
+      return `<span class="pill ${cls}">${text}</span>`;
+    }
+
+    function orderBlock(o) {
+      if (!o) {
+        return `<p class="linked-label">Linked order</p>
+          <p class="note">Not matched to a Seller Shield order. The payment was made outside the app, or the server restarted.</p>`;
+      }
+      const risk = o.risk;
+      const score = Number(risk?.score) || 0;
+      const meter = risk ? `
+        <div class="risk-head">
+          <strong class="risk-word">${LEVEL_LABEL[risk.level] || esc(risk.level)} at checkout</strong>
+          <span class="score">${score} of 100</span>
+        </div>
+        <div class="meter" role="img" aria-label="Risk score at checkout ${score} out of 100">
+          <div class="meter-fill" style="width:${Math.min(score, 100)}%"></div>
+          <span class="meter-tick t30"></span><span class="meter-tick t60"></span>
+        </div>` : '<p class="note">This order was not scored.</p>';
+      return `<p class="linked-label">Linked order</p>
+        ${meter}
+        <p class="meta">${money(o.amount)} · Buyer in ${esc(o.buyerCountry)}, shipping to ${esc(o.shipCountry)} · ${when(o.createdAt)}</p>`;
+    }
+
+    function packetHtml(id, p) {
+      const facts = (p.keyFacts || []).map(f =>
+        `<li class="${f.ok === false ? 'missing' : 'ok'}">${esc(f.text)}${f.ok === false ? ' <strong>(missing)</strong>' : ''}</li>`).join('');
+      const timeline = (p.timeline || []).map(t =>
+        `<li><time>${when(t.time)}</time>${esc(t.text)}</li>`).join('');
+      return `
+        <div class="packet">
+          <div>
+            <section>
+              <h3>Summary</h3>
+              <p class="analysis">${esc(p.summary || '')}</p>
+              <p class="source">${p.source === 'ai' ? 'AI analysis' : 'Rule-based summary (AI was unavailable)'}</p>
+            </section>
+            ${facts ? `<section><h3>Key facts</h3><ul class="facts">${facts}</ul></section>` : ''}
+            ${timeline ? `<section><h3>Timeline</h3><ol class="timeline">${timeline}</ol></section>` : ''}
+          </div>
+          <div>
+            <label for="reply-${esc(id)}">Reply to PayPal (edit before sending)</label>
+            <textarea id="reply-${esc(id)}">${esc(p.draftReply || '')}</textarea>
+            <div class="btn-row">
+              <button class="btn btn-primary btn-small" data-id="${esc(id)}" data-action="submit">Submit to PayPal</button>
+              <button class="btn btn-quiet btn-small" data-id="${esc(id)}" data-action="build">Rebuild draft</button>
+            </div>
+            <p class="note">After submitting, check the dispute in the sandbox Resolution Center as your business account.</p>
+          </div>
+        </div>`;
+    }
+
+    function disputeHtml(d) {
+      const id = d.dispute_id;
+      const o = d.order;
+      const level = o?.risk?.level;
+      const amount = d.dispute_amount || {};
+      const buyerMsg = (d.messages || []).filter(m => m.posted_by === 'BUYER').pop();
+      const canRespond = d.status === 'WAITING_FOR_SELLER_RESPONSE';
+      const packet = packets[id];
+
+      return `
+        <article class="order ${level ? 'risk-' + esc(level) : 'no-link'}">
+          <div>
+            <div class="amount">${money(amount.value || 0, amount.currency_code)}</div>
+            <div class="reason">${esc(REASON_LABEL[d.reason] || words(d.reason))}</div>
+            <div class="meta">
+              Opened ${d.create_time ? day(d.create_time) : 'unknown'}<br>
+              Dispute ${esc(id)}<br>
+              Stage: ${esc(words(d.dispute_life_cycle_stage || 'unknown'))}
+            </div>
+          </div>
+          <div>
+            ${orderBlock(o)}
+            ${buyerMsg ? `<p class="linked-label" style="margin-top:14px">Buyer says</p><p class="quote">${esc(buyerMsg.content)}</p>` : ''}
+          </div>
+          <div>
+            ${deadlinePill(d)}
+            ${d.seller_response_due_date && canRespond ? `<p class="note">Respond by ${day(d.seller_response_due_date)}</p>` : ''}
+            ${canRespond && !packet
+              ? `<div class="btn-row"><button class="btn btn-primary btn-small" data-id="${esc(id)}" data-action="build">Build evidence</button></div>`
+              : ''}
+          </div>
+          ${packet ? packetHtml(id, packet) : ''}
+        </article>`;
+    }
+
+    let disputes = [];
+
+    function render() {
+      document.querySelectorAll('textarea[id^="reply-"]').forEach(t => {
+        const id = t.id.slice('reply-'.length);
+        if (packets[id]) packets[id].draftReply = t.value;
+      });
+
+      const open = disputes.filter(d => d.status === 'WAITING_FOR_SELLER_RESPONSE')
+        .sort((a, b) => (daysLeft(a) ?? 999) - (daysLeft(b) ?? 999));
+      const other = disputes.filter(d => d.status !== 'WAITING_FOR_SELLER_RESPONSE');
+
+      $('openCount').textContent = open.length ? `${open.length} dispute${open.length === 1 ? '' : 's'}` : '';
+      $('otherCount').textContent = other.length ? `${other.length} dispute${other.length === 1 ? '' : 's'}` : '';
+
+      $('open').innerHTML = open.length
+        ? open.map(disputeHtml).join('')
+        : '<p class="empty">No disputes need a response. Open one as your sandbox buyer, then refresh.</p>';
+      $('other').innerHTML = other.length
+        ? other.map(disputeHtml).join('')
+        : '<p class="empty">Disputes waiting on the buyer, under review, or resolved appear here.</p>';
+    }
+
+    async function load() {
+      const btn = $('refreshBtn');
+      btn.disabled = true;
+      btn.textContent = 'Checking PayPal…';
+      try {
+        const res = await fetch('/api/disputes');
+        if (res.status === 404) {
+          showMessage('The server does not have the dispute routes yet (GET /api/disputes).', true);
+          disputes = [];
+        } else {
+          const data = await res.json();
+          if (!res.ok) {
+            showMessage(data.error || 'Could not load disputes from PayPal.', true);
+          } else {
+            disputes = data;
+            showMessage(`Last checked ${when(Date.now())}.`, false);
+          }
+        }
+      } catch {
+        showMessage('Could not reach the server. Check that it is still running.', true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Refresh from PayPal';
+      }
+      render();
+    }
+
+    document.addEventListener('click', async e => {
+      const btn = e.target.closest('button[data-action]');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const path = encodeURIComponent(id);
+      btn.disabled = true;
+
+      if (btn.dataset.action === 'build') {
+        btn.textContent = 'Building evidence…';
+        try {
+          const res = await fetch(`/api/disputes/${path}/evidence`, { method: 'POST' });
+          const data = await res.json();
+          if (!res.ok) showMessage(data.error || 'Could not build the evidence.', true);
+          else { packets[id] = data; showMessage('Evidence ready. Review the reply before submitting.', false); }
+        } catch {
+          showMessage('Could not reach the server. Check that it is still running.', true);
+        }
+        render();
+        return;
+      }
+
+      if (btn.dataset.action === 'submit') {
+        const reply = document.getElementById(`reply-${id}`)?.value.trim();
+        if (!reply) {
+          showMessage('Write a reply before submitting.', true);
+          btn.disabled = false;
+          return;
+        }
+        btn.textContent = 'Submitting…';
+        try {
+          const res = await fetch(`/api/disputes/${path}/submit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reply }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            showMessage(data.error || 'PayPal did not accept the submission.', true);
+            btn.disabled = false;
+            btn.textContent = 'Submit to PayPal';
+            return;
+          }
+          delete packets[id];
+          showMessage(data.message || 'Evidence sent to PayPal.', false);
+        } catch {
+          showMessage('Could not reach the server. Check that it is still running.', true);
+        }
+        load();
+      }
+    });
+
+    $('refreshBtn').addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>
